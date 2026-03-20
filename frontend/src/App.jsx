@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 
 // Using relative API path since frontend and backend are hosted seamlessly together on Render
-const API_BASE_URL = '/api';
+const API_BASE_URL = 'https://tubeflow-backend.onrender.com/api';
 
 function App() {
   const [url, setUrl] = useState('');
