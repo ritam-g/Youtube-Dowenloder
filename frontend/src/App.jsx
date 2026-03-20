@@ -20,8 +20,8 @@ import {
   Share2
 } from 'lucide-react';
 
-// Use environment variable for API base URL
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '/api' : 'http://localhost:3000/api');
+// Use environment variable for API base URL, natively defaulting to localhost for your setup
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000/api';
 
 function App() {
   const [url, setUrl] = useState('');
