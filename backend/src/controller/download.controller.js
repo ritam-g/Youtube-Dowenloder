@@ -1,9 +1,25 @@
 // Import yt-dlp-wrap (corrected import for ESM/CJS compatibility)
 // Auto-downloads correct binary (Windows/Linux) for Render compatibility
 const YTDlpWrap = require('yt-dlp-wrap').default;
+const fs = require('fs');
 
 // Utility for video info
 const path = require("path");
+
+// Use locally downloaded yt-dlp if it exists (e.g., from Render build script), else fallback to global yt-dlp
+const ytDlpBinaryPath = fs.existsSync(path.join(process.cwd(), 'yt-dlp')) ? './yt-dlp' : (fs.existsSync(path.join(__dirname, '..', '..', 'yt-dlp.exe')) ? path.join(__dirname, '..', '..', 'yt-dlp.exe') : 'yt-dlp');
+
+/**
+ * Helper to build standard yt-dlp arguments including cookies if configured
+ */
+function getBaseYTDlpArgs(url) {
+    const args = [url];
+    // On Render, we can upload a cookies.txt as a secret file and set COOKIES_PATH=/etc/secrets/cookies.txt
+    if (process.env.COOKIES_PATH) {
+        args.push('--cookies', process.env.COOKIES_PATH);
+    }
+    return args;
+}
 
 /**
  * =========================================================
@@ -20,12 +36,19 @@ async function downloadUrlController(req, res) {
             });
         }
 
-        // Create yt-dlp-wrap instance (auto-manages binary)
-        const ytDlpWrap = new YTDlpWrap();
+        // Create yt-dlp-wrap instance pointing directly to our binary
+        const ytDlpWrap = new YTDlpWrap(ytDlpBinaryPath);
 
         try {
-            // Get metadata directly (equivalent to --dump-json)
-            const videoInfo = await ytDlpWrap.getVideoInfo(url);
+            // Include cookies logic for protected fetch
+            const args = [
+                ...getBaseYTDlpArgs(url),
+                '-j', // --dump-json
+                '--no-playlist'
+            ];
+
+            let stdout = await ytDlpWrap.execPromise(args);
+            const videoInfo = JSON.parse(stdout);
 
             // Extract needed fields (with fallbacks)
             const videoDetails = {
@@ -45,7 +68,7 @@ async function downloadUrlController(req, res) {
         } catch (error) {
             console.error("yt-dlp info error:", error.message);
             res.status(500).json({
-                message: "Failed to fetch video info",
+                message: "Failed to fetch video info. It may require cookies.",
                 error: error.message
             });
         }
@@ -74,20 +97,22 @@ async function downloadVideoController(req, res) {
         }
 
         // Set download headers
-        res.setHeader("Content-Disposition", "attachment; filename=video.%(ext)s");
+        res.setHeader("Content-Disposition", "attachment; filename=video.mp4");
         res.setHeader("Content-Type", "video/mp4");
 
         // Create yt-dlp-wrap instance
-        const ytDlpWrap = new YTDlpWrap();
+        const ytDlpWrap = new YTDlpWrap(ytDlpBinaryPath);
 
         try {
-            // Create readable stream and pipe to response
-            const videoStream = ytDlpWrap.execStream([
+            const args = [
+                ...getBaseYTDlpArgs(url),
                 "-f", "best[ext=mp4]/best",
                 "--no-playlist",
-                "-o", "-",
-                url
-            ]);
+                "-o", "-"
+            ];
+
+            // Create readable stream and pipe to response
+            const videoStream = ytDlpWrap.execStream(args);
 
             videoStream.pipe(res);
 
