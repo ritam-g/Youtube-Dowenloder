@@ -20,8 +20,8 @@ import {
   Share2
 } from 'lucide-react';
 
-// Automatically route traffic to your live backend on Render in production so other devices can access it!
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? 'https://tubeflow-backend.onrender.com/api' : 'http://localhost:3000/api');
+// Using relative API path since frontend and backend are hosted seamlessly together on Render
+const API_BASE_URL = '/api';
 
 function App() {
   const [url, setUrl] = useState('');
