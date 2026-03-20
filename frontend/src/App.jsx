@@ -20,7 +20,7 @@ import {
   Share2
 } from 'lucide-react';
 
-// Using relative API path since frontend and backend are hosted seamlessly together on Render
+// Full Render URL since the frontend is hosted separately (e.g. on Vercel)
 const API_BASE_URL = 'https://tubeflow-backend.onrender.com/api';
 
 function App() {
