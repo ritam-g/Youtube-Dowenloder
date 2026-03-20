@@ -23,7 +23,7 @@ function getBaseYTDlpArgs(url) {
     ];
     if (process.env.COOKIES_PATH) {
         args.push('--cookies', process.env.COOKIES_PATH);
-    }t
+    }
     return args;
 }
 
