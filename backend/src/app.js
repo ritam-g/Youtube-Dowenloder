@@ -7,7 +7,7 @@ const app = express()
 
 app.use(express.json())
 app.use(cors({
-    origin: '*' // Allow any deployed frontend (like Vercel) to reach this local server
+    origin:"https://youtube-dowenloder.vercel.app"
 }))
 app.use(express.static("./public"))
 
