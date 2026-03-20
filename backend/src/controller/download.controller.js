@@ -10,6 +10,10 @@ const checkPaths = [
 ];
 const ytDlpBinaryPath = checkPaths.find(p => fs.existsSync(p)) || 'yt-dlp';
 
+console.log(`[DEBUG] Resolved yt-dlp path: ${ytDlpBinaryPath}`);
+console.log(`[DEBUG] Path exists: ${fs.existsSync(ytDlpBinaryPath)}`);
+console.log(`[DEBUG] Platform: ${process.platform}`);
+
 function getBaseYTDlpArgs(url) {
     const args = [
         url,
@@ -19,7 +23,7 @@ function getBaseYTDlpArgs(url) {
     ];
     if (process.env.COOKIES_PATH) {
         args.push('--cookies', process.env.COOKIES_PATH);
-    }
+    }t
     return args;
 }
 
@@ -34,10 +38,22 @@ async function processVideoController(req, res) {
         }
 
         const args = getBaseYTDlpArgs(url);
-        
+        console.log(`[DEBUG] Spawning yt-dlp: ${ytDlpBinaryPath} ${args.join(' ')}`);
+
         // Use native spawn for lightweight, non-blocking execution with explicit timeout
         const ytDlpProcess = spawn(ytDlpBinaryPath, args);
-        
+
+        ytDlpProcess.on('error', (spawnErr) => {
+            console.error('[DEBUG] Spawn error:', spawnErr.message);
+            clearTimeout(timeoutId);
+            if (!res.headersSent) {
+                res.status(500).json({
+                    message: `Spawn failed: ${spawnErr.message}`,
+                    error: spawnErr.message
+                });
+            }
+        });
+
         let stdoutData = '';
         let stderrData = '';
 
@@ -49,8 +65,9 @@ async function processVideoController(req, res) {
             stderrData += data.toString();
         });
 
-        // 15 seconds strict execution limit enforcing performance optimization
+        // 30 seconds timeout temporarily for debugging (was 15s)
         const timeoutId = setTimeout(() => {
+            console.log('[DEBUG] Process timeout triggered');
             ytDlpProcess.kill('SIGKILL');
             if (!res.headersSent) {
                 res.status(504).json({
@@ -59,25 +76,30 @@ async function processVideoController(req, res) {
                     fallbackMessage: "Please request the transcript manually or upload an audio file."
                 });
             }
-        }, 15000);
+        }, 30000);
 
         ytDlpProcess.on('close', (code) => {
             clearTimeout(timeoutId);
-            if (res.headersSent) return; // Prevent double sending if timeout already triggered
+            console.log(`[DEBUG] yt-dlp process closed with code: ${code}`);
+            console.log(`[DEBUG] stdout length: ${stdoutData.length}`);
+            console.log(`[DEBUG] stderr: ${stderrData}`);
+
+            if (res.headersSent) return;
 
             if (code !== 0) {
-                console.error("[yt-dlp process error]:", stderrData);
+                console.error("[yt-dlp process error] Exit code:", code, "STDERR:", stderrData);
                 return res.status(500).json({
                     message: "yt-dlp extraction failed",
                     fallbackAction: "upload_audio",
                     fallbackMessage: "Please upload an audio file instead.",
-                    error: stderrData.slice(0, 200)
+                    exitCode: code,
+                    error: stderrData.slice(0, 500)
                 });
             }
 
             try {
                 const videoInfo = JSON.parse(stdoutData);
-                
+
                 // Extremely cleanly isolate the best audio URL available natively
                 const audioFormats = (videoInfo.formats || []).filter(f => f.acodec !== 'none' && f.vcodec === 'none');
                 const bestAudio = audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
@@ -92,22 +114,24 @@ async function processVideoController(req, res) {
                     captionAvailable: captionAvailable
                 });
             } catch (err) {
-                console.error("Parse JSON stream error:", err);
+                console.error("Parse JSON stream error:", err, "STDOUT sample:", stdoutData.slice(0, 500));
                 return res.status(500).json({
                     message: "Failed to parse video info",
                     fallbackAction: "upload_audio",
-                    fallbackMessage: "Please upload an audio file instead."
+                    fallbackMessage: "Please upload an audio file instead.",
+                    stdoutSample: stdoutData.slice(0, 200)
                 });
             }
         });
 
     } catch (error) {
-        console.error("processVideoController outer error:", error);
-        res.status(500).json({
-            message: "Internal Server Error",
-            fallbackAction: "upload_audio",
-            fallbackMessage: "Please upload an audio file instead."
-        });
+        console.error("[DEBUG] processVideoController outer error:", error);
+        if (!res.headersSent) {
+            res.status(500).json({
+                message: `Internal Server Error: ${error.message}`,
+                error: error.message
+            });
+        }
     }
 }
 
