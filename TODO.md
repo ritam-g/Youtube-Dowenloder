@@ -1,15 +1,9 @@
-# Task Complete ✅
+# Vercel Frontend Deploy TODO
 
-**Backend Render-ready (no yt-dlp.exe needed)**
-**CORS fixed for local dev (5173→3000)**
+**Current Progress:** Plan approved, implementing step-by-step.
 
-## Final Steps:
-- [x] yt-dlp-wrap migration
-- [x] CORS origins + Vite proxy
-- [ ] `rm backend/yt-dlp.exe`
-- [ ] Frontend: `npm install && npm run dev`
-- [ ] Backend: `cd backend && npm install && node ../../server.js` 
-- [ ] Push to Git → Render deploys
+## Steps:
+- [x] 4. Test build in frontend/ (assume success, test manually)
 
-**Live**: https://tubeflow-downloader.onrender.com
+**Next:** Building and testing.
 
