@@ -1,140 +1,78 @@
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require("path");
+const axios = require('axios');
+const { getYouTubeVideoInfo } = require('../services/rapidapi.service');
 
-const checkPaths = [
-    path.join(__dirname, '..', '..', 'yt-dlp'),
-    path.join(__dirname, '..', '..', 'yt-dlp.exe'),
-    path.join(process.cwd(), 'yt-dlp'),
-    path.join(process.cwd(), 'yt-dlp.exe')
-];
-const ytDlpBinaryPath = checkPaths.find(p => fs.existsSync(p)) || 'yt-dlp';
-
-console.log(`[DEBUG] Resolved yt-dlp path: ${ytDlpBinaryPath}`);
-console.log(`[DEBUG] Path exists: ${fs.existsSync(ytDlpBinaryPath)}`);
-console.log(`[DEBUG] Platform: ${process.platform}`);
-
-function getBaseYTDlpArgs(url) {
-    const args = [
-        url,
-        '--dump-json',
-        '--skip-download',
-        '--no-playlist'
-    ];
-    if (process.env.COOKIES_PATH) {
-        args.push('--cookies', process.env.COOKIES_PATH);
-    }
-    return args;
-}
-
-async function processVideoController(req, res) {
+const processVideoController = async (req, res) => {
     try {
         const url = req.body.youtubeUrl || req.body.url;
 
         if (!url) {
-            return res.status(400).json({
-                message: "Please provide a YouTube URL",
-            });
+            return res.status(400).json({ message: "Please provide a valid YouTube URL" });
         }
 
-        const args = getBaseYTDlpArgs(url);
-        console.log(`[DEBUG] Spawning yt-dlp: ${ytDlpBinaryPath} ${args.join(' ')}`);
+        console.log(`[DEBUG] Analyzing via RapidAPI: ${url}`);
+        const result = await getYouTubeVideoInfo(url);
+        
+        if (!result || !result.streamingData) {
+            return res.status(500).json({ message: "Failed to retrieve streaming data for this video." });
+        }
 
-        // Use native spawn for lightweight, non-blocking execution with explicit timeout
-        const ytDlpProcess = spawn(ytDlpBinaryPath, args);
+        const details = result.videoDetails || result;
+        const streamingData = result.streamingData;
 
-        ytDlpProcess.on('error', (spawnErr) => {
-            console.error('[DEBUG] Spawn error:', spawnErr.message);
-            clearTimeout(timeoutId);
-            if (!res.headersSent) {
-                res.status(500).json({
-                    message: `Spawn failed: ${spawnErr.message}`,
-                    error: spawnErr.message
-                });
-            }
-        });
+        // Combine all formats
+        const allFormats = [
+            ...(streamingData.formats || []),
+            ...(streamingData.adaptiveFormats || [])
+        ];
 
-        let stdoutData = '';
-        let stderrData = '';
-
-        ytDlpProcess.stdout.on('data', (data) => {
-            stdoutData += data.toString();
-        });
-
-        ytDlpProcess.stderr.on('data', (data) => {
-            stderrData += data.toString();
-        });
-
-        // 30 seconds timeout temporarily for debugging (was 15s)
-        const timeoutId = setTimeout(() => {
-            console.log('[DEBUG] Process timeout triggered');
-            ytDlpProcess.kill('SIGKILL');
-            if (!res.headersSent) {
-                res.status(504).json({
-                    message: "Process timed out. Connection is slow or blocked.",
-                    fallbackAction: "upload_audio",
-                    fallbackMessage: "Please request the transcript manually or upload an audio file."
-                });
-            }
-        }, 30000);
-
-        ytDlpProcess.on('close', (code) => {
-            clearTimeout(timeoutId);
-            console.log(`[DEBUG] yt-dlp process closed with code: ${code}`);
-            console.log(`[DEBUG] stdout length: ${stdoutData.length}`);
-            console.log(`[DEBUG] stderr: ${stderrData}`);
-
-            if (res.headersSent) return;
-
-            if (code !== 0) {
-                console.error("[yt-dlp process error] Exit code:", code, "STDERR:", stderrData);
-                return res.status(500).json({
-                    message: "yt-dlp extraction failed",
-                    fallbackAction: "upload_audio",
-                    fallbackMessage: "Please upload an audio file instead.",
-                    exitCode: code,
-                    error: stderrData.slice(0, 500)
-                });
-            }
-
-            try {
-                const videoInfo = JSON.parse(stdoutData);
-
-                // Extremely cleanly isolate the best audio URL available natively
-                const audioFormats = (videoInfo.formats || []).filter(f => f.acodec !== 'none' && f.vcodec === 'none');
-                const bestAudio = audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
-
-                const captionAvailable = !!(videoInfo.subtitles && Object.keys(videoInfo.subtitles).length > 0) || !!(videoInfo.automatic_captions && Object.keys(videoInfo.automatic_captions).length > 0);
-
-                return res.status(200).json({
-                    videoId: videoInfo.id,
-                    title: videoInfo.title || 'Unknown',
-                    duration: videoInfo.duration,
-                    audioUrl: bestAudio ? bestAudio.url : null,
-                    captionAvailable: captionAvailable
-                });
-            } catch (err) {
-                console.error("Parse JSON stream error:", err, "STDOUT sample:", stdoutData.slice(0, 500));
-                return res.status(500).json({
-                    message: "Failed to parse video info",
-                    fallbackAction: "upload_audio",
-                    fallbackMessage: "Please upload an audio file instead.",
-                    stdoutSample: stdoutData.slice(0, 200)
-                });
-            }
+        return res.status(200).json({
+            videoId: details.videoId || details.id,
+            title: details.title || 'YouTube Video',
+            thumbnail: details.thumbnail?.thumbnails?.[0]?.url || details.thumbnail?.[0]?.url || '',
+            duration: parseInt(details.lengthSeconds || details.duration || 0),
+            views: details.viewCount || details.views || 0,
+            formats: allFormats.map(f => ({
+                quality: f.qualityLabel || f.quality || 'Standard',
+                url: f.url,
+                mimeType: f.mimeType,
+                hasVideo: !!(f.width || f.height),
+                hasAudio: !!(f.audioBitrate || f.bitrate || f.mimeType?.includes('audio')),
+                fileSize: f.contentLength ? (parseInt(f.contentLength) / (1024 * 1024)).toFixed(2) + ' MB' : 'Link'
+            })).slice(0, 15)
         });
 
     } catch (error) {
-        console.error("[DEBUG] processVideoController outer error:", error);
-        if (!res.headersSent) {
-            res.status(500).json({
-                message: `Internal Server Error: ${error.message}`,
-                error: error.message
-            });
-        }
+        console.error("[DEBUG] Controller error:", error.message);
+        return res.status(500).json({ message: `Service Error: ${error.message}` });
     }
-}
+};
+
+const downloadVideoController = async (req, res) => {
+    try {
+        const { url, title } = req.query;
+        if (!url) return res.status(400).send("No URL provided");
+
+        console.log(`[DEBUG] Starting stream download for: ${title}`);
+
+        const response = await axios({
+            method: 'get',
+            url: url,
+            responseType: 'stream'
+        });
+
+        const filename = title ? `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4` : 'video.mp4';
+
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'video/mp4');
+
+        response.data.pipe(res);
+    } catch (error) {
+        console.error("[DEBUG] Download stream error:", error.message);
+        res.status(500).send("Failed to stream video");
+    }
+};
 
 module.exports = {
-    processVideoController
+    processVideoController,
+    downloadVideoController
 };

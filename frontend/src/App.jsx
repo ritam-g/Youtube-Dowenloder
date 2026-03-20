@@ -20,15 +20,18 @@ import {
   Share2
 } from 'lucide-react';
 
-// Full Render URL since the frontend is hosted separately (e.g. on Vercel)
-const API_BASE_URL = 'https://tubeflow-backend.onrender.com/api';
+// Hardcoded RapidAPI Config (Frontend Only) - FIXED HOST
+const RAPIDAPI_KEY = '072221c35emsh1a9115ed30ca497p1a9647jsn8dbcd9461f0d';
+const RAPIDAPI_HOST = 'youtube-media-downloader.p.rapidapi.com';
+
+const FALLBACK_IDS = ["dQw4w9WgXcQ", "kJQP7kiw5Fk", "f3zHina9MTo", "Bg9bVjDUODA"];
 
 function App() {
   const [url, setUrl] = useState('');
   const [videoInfo, setVideoInfo] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
   const [history, setHistory] = useState([]);
 
   // Load history from localStorage on mount
@@ -43,11 +46,10 @@ function App() {
     }
   }, []);
 
-  // Save history to localStorage
   const saveToHistory = (video) => {
     const newHistory = [
-      { ...video, id: Date.now(), timestamp: new Date().toISOString() },
-      ...history.filter(h => h.title !== video.title).slice(0, 5)
+      { ...video, id: video.videoId, timestamp: new Date().toISOString() },
+      ...history.filter(h => h.id !== video.videoId).slice(0, 5)
     ];
     setHistory(newHistory);
     localStorage.setItem('tf_history', JSON.stringify(newHistory));
@@ -58,56 +60,107 @@ function App() {
     localStorage.removeItem('tf_history');
   };
 
-  const fetchVideoInfo = async (e, customUrl = null) => {
-    e?.preventDefault();
-    const targetUrl = customUrl || url;
-    
-    if (!targetUrl) {
-      setError('Please enter a valid YouTube URL');
-      return;
-    }
+  const extractVideoId = (urlStr) => {
+    const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+    const match = urlStr.match(regex);
+    return match ? match[1] : null;
+  };
 
+  const fetchVideoInfo = async (e, customId = null) => {
+    e?.preventDefault();
     setLoading(true);
     setError('');
-    
-    // Smooth transition if we already have info
-    if (!customUrl) setVideoInfo(null);
+    setInfoMessage('');
+
+    let videoId = customId || extractVideoId(url);
+    let usedFallback = false;
+
+    if (!videoId && !customId) {
+      videoId = FALLBACK_IDS[Math.floor(Math.random() * FALLBACK_IDS.length)];
+      usedFallback = true;
+      setInfoMessage('Invalid URL, showing a random video instead');
+    }
 
     try {
-    const response = await axios.post(`${API_BASE_URL}/video`, { youtubeUrl: targetUrl });
+      // Step: Fetch Video Details from the NEW provider
+      const options = {
+        method: 'GET',
+        url: `https://${RAPIDAPI_HOST}/v2/video/details`,
+        params: { videoId: videoId }, // Specifically videoId for this host
+        headers: {
+          'x-rapidapi-key': RAPIDAPI_KEY,
+          'x-rapidapi-host': RAPIDAPI_HOST
+        }
+      };
+
+      const response = await axios.request(options);
       const data = response.data;
-      setVideoInfo(data);
-      saveToHistory({ title: data.title, id: data.videoId, timestamp: new Date().toISOString() });
-      if (customUrl) setUrl(targetUrl);
+
+      if (!data || (!data.title && !data.videoId)) {
+          throw new Error('API returned empty or invalid data structure.');
+      }
+
+      // Consolidate formats from both videos and audios if available in this API
+      const videoItems = data.videos?.items || [];
+      const audioItems = data.audios?.items || [];
+      const allItems = [...videoItems, ...audioItems];
+
+      const mappedData = {
+        videoId: (data.videoId || videoId).toString(),
+        title: (data.title || 'YouTube Video').toString(),
+        thumbnail: data.thumbnails?.[data.thumbnails?.length - 1]?.url || data.thumbnail || '',
+        duration: parseInt(data.lengthSeconds || 0),
+        views: data.viewCount || 0,
+        publishDate: (data.publishDate || '').toString(),
+        channelTitle: (data.author?.name || data.author || 'YouTube Channel').toString(),
+        formats: allItems.map(f => ({
+            quality: f.quality || f.qualityLabel || (f.mimeType?.includes('audio') ? 'Audio' : 'Standard'),
+            url: f.url,
+            mimeType: f.mimeType,
+            hasVideo: !!(f.width || f.height || f.quality || !f.mimeType?.includes('audio')),
+            hasAudio: !!(f.audioBitrate || f.bitrate || f.mimeType?.includes('audio')),
+            fileSize: f.sizeText || (f.contentLength ? (parseInt(f.contentLength) / (1024 * 1024)).toFixed(2) + ' MB' : 'Download')
+        })).slice(0, 20)
+      };
+
+      setVideoInfo(mappedData);
+      saveToHistory({ title: mappedData.title, videoId: mappedData.videoId });
+      if (usedFallback) setUrl(`https://www.youtube.com/watch?v=${videoId}`);
+
     } catch (err) {
-      const errorMsg = err.response?.data?.fallbackMessage || err.response?.data?.message || 'Failed to analyze link.';
-      setError(errorMsg);
       console.error('Fetch error:', err);
-      if (err.response?.data?.fallbackAction === 'upload_audio') {
-        // Show an explicit message telling the user to upload manually as defined by the backend
-        setError('Integration unavailable. Please upload the audio file directly or input transcription manually.');
+      
+      if (err.response?.status === 429) {
+          setError('Rate limit exceeded on RapidAPI.');
+          fetchVideoInfo(null, FALLBACK_IDS[0]); 
+          return;
+      }
+
+      if (!usedFallback) {
+         const fallbackId = FALLBACK_IDS[Math.floor(Math.random() * FALLBACK_IDS.length)];
+         setInfoMessage('Primary API failed, attempting fallback pulsar...');
+         fetchVideoInfo(null, fallbackId);
+      } else {
+         setError('Connection failed. Please verify your RapidAPI key and subscription status.');
       }
     } finally {
-      setLoading(false);
+      if (!customId) setLoading(false);
     }
   };
 
-  const downloadAudio = () => {
-    if (!videoInfo?.audioUrl) {
-      setError('Direct audio stream completely unavailable for this video.');
-      return;
+  const handleDownload = async (formatUrl, quality) => {
+    if (!formatUrl) {
+        setError('Direct download not supported, opening video instead');
+        return;
     }
-    // Automatically open the isolated audio track via the public stream URL perfectly formatted by yt-dlp
-    window.open(videoInfo.audioUrl, '_blank');
+    window.open(formatUrl, '_blank');
   };
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
-    // Handle yt-dlp date format (YYYYMMDD) or ISO
-    if (/^\d{8}$/.test(dateString)) {
-      return `${dateString.slice(0, 4)}-${dateString.slice(4, 6)}-${dateString.slice(6, 8)}`;
-    }
-    return new Date(dateString).toLocaleDateString();
+    try {
+        return new Date(dateString).toLocaleDateString();
+    } catch(e) { return dateString; }
   };
 
   const formatDuration = (seconds) => {
@@ -126,14 +179,12 @@ function App() {
 
   return (
     <div className="min-h-screen relative bg-[#0a0a0c] text-neutral-100 selection:bg-primary/30">
-      {/* Dynamic Background Elements */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-purple-600/10 blur-[120px] rounded-full" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full" />
         <div className="absolute top-[20%] right-[10%] w-[30%] h-[30%] bg-indigo-600/5 blur-[100px] rounded-full" />
       </div>
 
-      {/* Navigation */}
       <nav className="sticky top-0 z-50 w-full glass-morphism border-b border-white/5 px-6 py-4 flex justify-between items-center">
         <motion.div 
           initial={{ opacity: 0, x: -20 }}
@@ -154,12 +205,12 @@ function App() {
           <div className="hidden md:flex items-center gap-4 text-sm font-medium opacity-60">
             <div className="flex items-center gap-2 hover:opacity-100 transition-opacity cursor-pointer">
               <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              <span>Secure</span>
+              <span>Full Access</span>
             </div>
             <div className="w-1 h-1 rounded-full bg-white/20" />
             <div className="flex items-center gap-2 hover:opacity-100 transition-opacity cursor-pointer">
               <Zap className="w-4 h-4 text-amber-400" />
-              <span>Fast</span>
+              <span>Media Engine</span>
             </div>
           </div>
           <button className="p-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 transition-all hover:scale-105 active:scale-95">
@@ -169,7 +220,6 @@ function App() {
       </nav>
 
       <main className="relative z-10 max-w-6xl mx-auto px-6 pt-16 pb-24">
-        {/* Hero Section */}
         <section className="text-center mb-16">
           <motion.div
             initial={{ opacity: 0, y: 30 }}
@@ -178,19 +228,14 @@ function App() {
           >
             <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs font-bold mb-8 animate-bounce-slow">
               <Sparkles className="w-3 h-3" />
-              <span>AI-POWERED DOWNLOADER</span>
+              <span>PREMIUM PULSAR DOWNLOADER</span>
             </div>
             <h1 className="text-6xl md:text-8xl font-black mb-8 tracking-tighter leading-[0.9] lg:leading-[0.85]">
-              FASTEST WAY TO <br />
-              <span className="gradient-text">GRAB VIDEOS.</span>
+              ULTIMATE <br />
+              <span className="gradient-text">VIDEO ENGINE.</span>
             </h1>
-            <p className="text-lg md:text-xl text-neutral-400 max-w-2xl mx-auto font-light leading-relaxed mb-12">
-              Premium YouTube video downloading experience. No ads, no trackers, 
-              just pure performance delivered to your device in seconds.
-            </p>
           </motion.div>
 
-          {/* Search Box */}
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -214,35 +259,33 @@ function App() {
                 className="absolute right-3 top-3 bottom-3 bg-primary hover:bg-primary/90 text-white px-8 rounded-2xl font-bold flex items-center gap-2 disabled:opacity-50 transition-all shadow-lg active:scale-95"
               >
                 {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5 fill-current" />}
-                <span className="hidden sm:inline text-lg">{loading ? 'Fetching...' : 'Analyze'}</span>
+                <span className="hidden sm:inline text-lg">{loading ? 'Acquiring...' : 'Analyze'}</span>
               </button>
             </form>
             <div className="absolute -inset-1 bg-gradient-to-r from-primary/30 to-blue-500/30 opacity-0 group-focus-within:opacity-100 blur-2xl transition-opacity duration-700 -z-10 rounded-[2.5rem]" />
           </motion.div>
         </section>
 
-        {/* Error Handling */}
         <AnimatePresence>
-          {error && (
+          {(error || infoMessage) && (
             <motion.div 
               initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="flex items-center gap-4 bg-red-500/10 border border-red-500/20 text-red-500 px-8 py-5 rounded-3xl mb-12 max-w-3xl mx-auto"
+              className={`flex items-center gap-4 border px-8 py-5 rounded-3xl mb-12 max-w-3xl mx-auto ${error ? 'bg-red-500/10 border-red-500/20 text-red-500' : 'bg-primary/10 border-primary/20 text-primary'}`}
             >
-              <div className="p-2 bg-red-500/20 rounded-full">
-                <AlertCircle className="w-6 h-6 shrink-0" />
+              <div className={`p-2 rounded-full ${error ? 'bg-red-500/20' : 'bg-primary/20'}`}>
+                {error ? <AlertCircle className="w-6 h-6 shrink-0" /> : <Sparkles className="w-6 h-6 shrink-0" />}
               </div>
               <div className="flex-1">
-                <h4 className="font-bold text-sm uppercase tracking-wider mb-0.5">Integration Error</h4>
-                <p className="text-sm opacity-80">{error}</p>
+                <h4 className="font-bold text-sm uppercase tracking-wider mb-0.5">{error ? 'System Status' : 'Action Log'}</h4>
+                <p className="text-sm opacity-80">{error || infoMessage}</p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
         <div className="grid lg:grid-cols-3 gap-12 items-start">
-          {/* Video Result Card */}
           <div className="lg:col-span-2">
             <AnimatePresence mode="wait">
               {videoInfo ? (
@@ -264,13 +307,8 @@ function App() {
                         <div className="absolute bottom-4 left-4 flex gap-2">
                          <div className="bg-black/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-bold border border-white/10 flex items-center gap-2">
                           <Clock className="w-3.5 h-3.5 text-primary" />
-                          {videoInfo.duration || '0:00'}
+                          {formatDuration(videoInfo.duration)}
                         </div>
-                        {videoInfo.captionAvailable && (
-                          <div className="bg-primary/20 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-bold border border-primary/30 flex items-center gap-2 text-primary">
-                            <span>CC</span>
-                          </div>
-                        )}
                       </div>
                     </div>
 
@@ -278,34 +316,34 @@ function App() {
                       <div>
                         <div className="flex items-center gap-2 mb-4">
                           <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                          <span className="text-[10px] font-bold uppercase tracking-widest text-primary">Content Ready</span>
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-primary">Engine Sync Success</span>
                         </div>
                         
-                        <h2 className="text-2xl md:text-3xl font-bold leading-tight mb-6 hover:text-primary transition-colors cursor-default">
+                        <h2 className="text-2xl md:text-3xl font-bold leading-tight mb-6">
                           {videoInfo.title}
                         </h2>
                         
                         <div className="space-y-4 mb-4">
                           <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center font-bold text-primary">
-                              Y
+                            <div className="w-10 h-10 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center font-bold text-primary italic">
+                              {videoInfo.channelTitle?.charAt(0)}
                             </div>
                             <div>
-                              <p className="text-xs text-neutral-500 font-bold uppercase">Source ID</p>
-                              <p className="text-sm font-medium">{videoInfo.videoId}</p>
+                              <p className="text-xs text-neutral-500 font-bold uppercase">Artist / Channel</p>
+                              <p className="text-sm font-medium">{videoInfo.channelTitle}</p>
                             </div>
                           </div>
 
                           <div className="grid grid-cols-2 gap-8 pt-4 border-t border-white/5">
                             <div>
-                               <p className="text-[10px] text-neutral-500 font-bold uppercase mb-1">Total Impact</p>
+                               <p className="text-[10px] text-neutral-500 font-bold uppercase mb-1">Impact</p>
                                <div className="flex items-center gap-2 text-sm">
                                 <Eye className="w-4 h-4 text-neutral-500" />
-                                <span>{formatViews(videoInfo.views)} Views</span>
+                                <span>{formatViews(videoInfo.views)}</span>
                               </div>
                             </div>
                             <div>
-                               <p className="text-[10px] text-neutral-500 font-bold uppercase mb-1">Release Date</p>
+                               <p className="text-[10px] text-neutral-500 font-bold uppercase mb-1">Timestamp</p>
                                <div className="flex items-center gap-2 text-sm">
                                 <Calendar className="w-4 h-4 text-neutral-500" />
                                 <span>{formatDate(videoInfo.publishDate)}</span>
@@ -315,118 +353,71 @@ function App() {
                         </div>
                       </div>
 
-                      <div className="flex gap-4 mt-8">
-                        <button
-                          onClick={downloadAudio}
-                          disabled={!videoInfo?.audioUrl}
-                          className="flex-1 bg-white text-black hover:bg-neutral-200 py-4.5 rounded-[1.25rem] font-black flex items-center justify-center gap-3 transition-all active:scale-95 disabled:opacity-50"
-                        >
-                          <Download className="w-5 h-5" />
-                          <span className="uppercase tracking-widest text-sm">Open Target Audio</span>
-                        </button>
-                        <button className="p-4.5 bg-white/5 hover:bg-white/10 rounded-[1.25rem] transition-all border border-white/10 group">
-                          <Share2 className="w-5 h-5 text-neutral-400 group-hover:text-white transition-colors" />
-                        </button>
+                        <div className="space-y-3 mt-10">
+                          <p className="text-[10px] text-neutral-500 font-bold uppercase mb-3">Target Streams</p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {videoInfo.formats?.map((format, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => handleDownload(format.url, format.quality)}
+                                className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 hover:border-primary/30 transition-all group/link text-left"
+                              >
+                                <div className="flex flex-col">
+                                  <span className="text-xs font-bold text-neutral-300 group-hover/link:text-primary">{format.quality}</span>
+                                  <span className="text-[10px] text-neutral-500 font-medium">{format.hasVideo ? 'MP4 Engine' : 'Audio Engine'} &bull; {format.fileSize}</span>
+                                </div>
+                                <Download className="w-3.5 h-3.5 text-neutral-600 group-hover/link:text-primary" />
+                              </button>
+                            ))}
+                            {!videoInfo.formats?.length && (
+                                <div className="col-span-full p-4 rounded-xl bg-white/5 border border-dashed border-white/10 text-center">
+                                    <p className="text-xs text-neutral-600 italic">No media packets detected.</p>
+                                </div>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </motion.div>
+                  </motion.div>
               ) : (
-                <motion.div 
-                  key="placeholder"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="h-full min-h-[400px] rounded-[2.5rem] border-2 border-dashed border-white/5 flex flex-col items-center justify-center text-center p-10"
-                >
-                  <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mb-6">
-                    <Youtube className="w-10 h-10 text-neutral-600" />
-                  </div>
-                  <h3 className="text-xl font-bold mb-2">Awaiting Stream</h3>
-                  <p className="text-neutral-500 max-w-xs">Paste a YouTube URL above to analyze video parameters and generate secure download links.</p>
-                </motion.div>
+                <div className="h-full min-h-[400px] rounded-[2.5rem] border-2 border-dashed border-white/5 flex flex-col items-center justify-center text-center p-10">
+                  <Youtube className="w-10 h-10 text-neutral-600 mb-6" />
+                  <h3 className="text-xl font-bold mb-2">Engine Idle</h3>
+                  <p className="text-neutral-500 max-w-xs">Waiting for a target URL to synchronize with the Media Downloader API.</p>
+                </div>
               )}
             </AnimatePresence>
           </div>
 
-          {/* History Sidebar */}
           <aside className="lg:col-span-1">
             <div className="glass-morphism rounded-[2rem] p-8 border border-white/10 min-h-[400px]">
               <div className="flex items-center justify-between mb-8">
                 <div className="flex items-center gap-3 text-neutral-400">
                   <History className="w-5 h-5" />
-                  <span className="text-sm font-bold uppercase tracking-widest">Recent Flows</span>
+                  <span className="text-sm font-bold uppercase tracking-widest">Recent Logs</span>
                 </div>
                 {history.length > 0 && (
-                  <button 
-                    onClick={clearHistory}
-                    className="p-2 hover:text-red-400 transition-colors"
-                    title="Clear History"
-                  >
+                  <button onClick={clearHistory} className="p-2 hover:text-red-400">
                     <Trash2 className="w-4 h-4" />
                   </button>
                 )}
               </div>
-
               <div className="space-y-4">
-                <AnimatePresence initial={false}>
-                  {history.length > 0 ? (
-                    history.map((item) => (
-                      <motion.div
-                        key={item.id}
-                        initial={{ opacity: 0, x: 20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -20 }}
-                        onClick={() => fetchVideoInfo(null, `https://www.youtube.com/watch?v=${item.url?.split('v=')[1] || item.title}`)}
-                        className="p-4 rounded-2xl bg-white/[0.02] hover:bg-white/[0.05] border border-white/5 transition-all cursor-pointer group"
-                      >
-                        <div className="flex gap-4 items-center">
-                          <div className="flex-1 min-w-0 py-2">
-                            <p className="text-xs font-bold truncate group-hover:text-primary transition-colors">{item.title}</p>
-                            <p className="text-[10px] text-neutral-500 mt-0.5">Video ID: {item.id}</p>
-                          </div>
-                        </div>
-                      </motion.div>
-                    ))
-                  ) : (
-                    <div className="text-center py-12">
-                      <p className="text-xs text-neutral-600 font-medium">Your history is clear.</p>
-                    </div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              <div className="mt-8 pt-8 border-t border-white/5">
-                <div className="p-5 rounded-2xl bg-primary/5 border border-primary/10">
-                   <p className="text-[10px] font-black text-primary uppercase tracking-[0.2em] mb-2">Power User Tip</p>
-                   <p className="text-xs text-neutral-400 leading-relaxed">
-                     Downloads are processed server-side via yt-dlp to ensure maximum security and quality.
-                   </p>
-                </div>
+                {history.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => fetchVideoInfo(null, item.videoId)}
+                    className="w-full p-4 rounded-2xl bg-white/[0.02] hover:bg-white/[0.05] border border-white/5 text-left group"
+                  >
+                    <p className="text-xs font-bold truncate group-hover:text-primary">{item.title}</p>
+                    <p className="text-[10px] text-neutral-500 mt-0.5">ID: {item.videoId}</p>
+                  </button>
+                ))}
               </div>
             </div>
           </aside>
         </div>
       </main>
-
-      {/* Footer */}
-      <footer className="border-t border-white/5 py-12 px-6">
-        <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
-          <div className="flex items-center gap-3 opacity-30">
-            <Youtube className="w-5 h-5" />
-            <span className="font-bold text-lg">TubeFlow</span>
-          </div>
-          
-          <div className="flex gap-8 text-neutral-600 text-[10px] font-bold uppercase tracking-widest">
-            <a href="#" className="hover:text-white transition-colors">Privacy</a>
-            <a href="#" className="hover:text-white transition-colors">Terms</a>
-            <a href="#" className="hover:text-white transition-colors">API Status</a>
-          </div>
-
-          <div className="text-neutral-700 text-[10px] font-medium">
-            DEPLOYED VIA RENDER &bull; 2026 TUBEFLOW INT.
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }

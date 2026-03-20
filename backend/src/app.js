@@ -12,14 +12,14 @@ app.use((req, res, next) => {
     next();
 });
 app.use(cors({
-    origin: ["https://youtube-dowenloder.vercel.app", "http://localhost:5173", "https://tubeflow-backend.onrender.com"],
+    origin: ["https://youtube-dowenloder.vercel.app", "http://localhost:5173", "https://tubeflow-backend.onrender.com","http://localhost:3000"],
     credentials: true
 }))
 app.use(express.static("./public"))
 
 app.use('/api', downloadRouter)
 
-app.get('*', (req, res) => {
+app.get('*any', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'public', 'index.html'))
 })
 module.exports = app

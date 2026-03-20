@@ -4,18 +4,16 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "postinstall": "node postinstall.js"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@distube/ytdl-core": "^4.16.12",
-    "child_process": "^1.0.2",
+    "axios": "^1.13.6",
     "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "yt-dlp-wrap": "^2.3.12"
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1"
   }
 }
