@@ -1,9 +1,5 @@
-// Import yt-dlp-wrap (corrected import for ESM/CJS compatibility)
-// Auto-downloads correct binary (Windows/Linux) for Render compatibility
-const YTDlpWrap = require('yt-dlp-wrap').default;
+const { spawn } = require('child_process');
 const fs = require('fs');
-
-// Utility for video info
 const path = require("path");
 
 const checkPaths = [
@@ -14,26 +10,22 @@ const checkPaths = [
 ];
 const ytDlpBinaryPath = checkPaths.find(p => fs.existsSync(p)) || 'yt-dlp';
 
-/**
- * Helper to build standard yt-dlp arguments including cookies if configured
- */
 function getBaseYTDlpArgs(url) {
-    const args = [url];
-    // On Render, we can upload a cookies.txt as a secret file and set COOKIES_PATH=/etc/secrets/cookies.txt
+    const args = [
+        url,
+        '--dump-json',
+        '--skip-download',
+        '--no-playlist'
+    ];
     if (process.env.COOKIES_PATH) {
         args.push('--cookies', process.env.COOKIES_PATH);
     }
     return args;
 }
 
-/**
- * =========================================================
- * Controller: Get YouTube Video Information
- * =========================================================
- */
-async function downloadUrlController(req, res) {
+async function processVideoController(req, res) {
     try {
-        const { url } = req.body;
+        const url = req.body.youtubeUrl || req.body.url;
 
         if (!url) {
             return res.status(400).json({
@@ -41,118 +33,84 @@ async function downloadUrlController(req, res) {
             });
         }
 
-        // Create yt-dlp-wrap instance pointing directly to our binary
-        const ytDlpWrap = new YTDlpWrap(ytDlpBinaryPath);
+        const args = getBaseYTDlpArgs(url);
+        
+        // Use native spawn for lightweight, non-blocking execution with explicit timeout
+        const ytDlpProcess = spawn(ytDlpBinaryPath, args);
+        
+        let stdoutData = '';
+        let stderrData = '';
 
-        try {
-            // Include cookies logic for protected fetch
-            const args = [
-                ...getBaseYTDlpArgs(url),
-                '-j', // --dump-json
-                '--no-playlist'
-            ];
+        ytDlpProcess.stdout.on('data', (data) => {
+            stdoutData += data.toString();
+        });
 
-            let stdout = await ytDlpWrap.execPromise(args);
-            const videoInfo = JSON.parse(stdout);
+        ytDlpProcess.stderr.on('data', (data) => {
+            stderrData += data.toString();
+        });
 
-            // Extract needed fields (with fallbacks)
-            const videoDetails = {
-                title: videoInfo.title || 'Unknown',
-                author: videoInfo.uploader || videoInfo.channel || 'Unknown',
-                duration: videoInfo.duration,
-                views: videoInfo.view_count,
-                thumbnail: videoInfo.thumbnail,
-                publishDate: videoInfo.upload_date,
-            };
+        // 15 seconds strict execution limit enforcing performance optimization
+        const timeoutId = setTimeout(() => {
+            ytDlpProcess.kill('SIGKILL');
+            if (!res.headersSent) {
+                res.status(504).json({
+                    message: "Process timed out. Connection is slow or blocked.",
+                    fallbackAction: "upload_audio",
+                    fallbackMessage: "Please request the transcript manually or upload an audio file."
+                });
+            }
+        }, 15000);
 
-            res.status(200).json({
-                message: "Video info fetched successfully",
-                data: videoDetails,
-            });
+        ytDlpProcess.on('close', (code) => {
+            clearTimeout(timeoutId);
+            if (res.headersSent) return; // Prevent double sending if timeout already triggered
 
-        } catch (error) {
-            console.error("yt-dlp info error:", error.message);
-            res.status(500).json({
-                message: "Failed to fetch video info. It may require cookies.",
-                error: error.message
-            });
-        }
+            if (code !== 0) {
+                console.error("[yt-dlp process error]:", stderrData);
+                return res.status(500).json({
+                    message: "yt-dlp extraction failed",
+                    fallbackAction: "upload_audio",
+                    fallbackMessage: "Please upload an audio file instead.",
+                    error: stderrData.slice(0, 200)
+                });
+            }
+
+            try {
+                const videoInfo = JSON.parse(stdoutData);
+                
+                // Extremely cleanly isolate the best audio URL available natively
+                const audioFormats = (videoInfo.formats || []).filter(f => f.acodec !== 'none' && f.vcodec === 'none');
+                const bestAudio = audioFormats.sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+                const captionAvailable = !!(videoInfo.subtitles && Object.keys(videoInfo.subtitles).length > 0) || !!(videoInfo.automatic_captions && Object.keys(videoInfo.automatic_captions).length > 0);
+
+                return res.status(200).json({
+                    videoId: videoInfo.id,
+                    title: videoInfo.title || 'Unknown',
+                    duration: videoInfo.duration,
+                    audioUrl: bestAudio ? bestAudio.url : null,
+                    captionAvailable: captionAvailable
+                });
+            } catch (err) {
+                console.error("Parse JSON stream error:", err);
+                return res.status(500).json({
+                    message: "Failed to parse video info",
+                    fallbackAction: "upload_audio",
+                    fallbackMessage: "Please upload an audio file instead."
+                });
+            }
+        });
 
     } catch (error) {
-        console.error("Info controller error:", error);
+        console.error("processVideoController outer error:", error);
         res.status(500).json({
             message: "Internal Server Error",
+            fallbackAction: "upload_audio",
+            fallbackMessage: "Please upload an audio file instead."
         });
     }
 }
 
-/**
- * =========================================================
- * Controller: Download YouTube Video (Stream)
- * =========================================================
- */
-async function downloadVideoController(req, res) {
-    try {
-        const { url } = req.query;
-
-        if (!url) {
-            return res.status(400).json({
-                message: "Please provide YouTube URL",
-            });
-        }
-
-        // Set download headers
-        res.setHeader("Content-Disposition", "attachment; filename=video.mp4");
-        res.setHeader("Content-Type", "video/mp4");
-
-        // Create yt-dlp-wrap instance
-        const ytDlpWrap = new YTDlpWrap(ytDlpBinaryPath);
-
-        try {
-            const args = [
-                ...getBaseYTDlpArgs(url),
-                "-f", "best[ext=mp4]/best",
-                "--no-playlist",
-                "-o", "-"
-            ];
-
-            // Create readable stream and pipe to response
-            const videoStream = ytDlpWrap.execStream(args);
-
-            videoStream.pipe(res);
-
-            videoStream.on('error', (error) => {
-                console.error("Stream error:", error.message);
-                if (!res.headersSent) {
-                    res.status(500).json({ message: "Stream failed", error: error.message });
-                }
-            });
-
-            videoStream.on('close', () => {
-                console.log("Download stream closed");
-            });
-
-        } catch (error) {
-            console.error("yt-dlp download error:", error.message);
-            if (!res.headersSent) {
-                res.status(500).json({
-                    message: "Download failed",
-                    error: error.message
-                });
-            }
-        }
-
-    } catch (error) {
-        console.error("Download controller error:", error);
-        if (!res.headersSent) {
-            res.status(500).json({
-                message: "Internal Server Error",
-            });
-        }
-    }
-}
-
 module.exports = {
-    downloadVideoController,
-    downloadUrlController,
+    processVideoController
 };

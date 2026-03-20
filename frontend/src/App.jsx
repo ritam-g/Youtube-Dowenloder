@@ -74,43 +74,31 @@ function App() {
     if (!customUrl) setVideoInfo(null);
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/info`, { url: targetUrl });
-      const data = response.data.data;
+    const response = await axios.post(`${API_BASE_URL}/video`, { youtubeUrl: targetUrl });
+      const data = response.data;
       setVideoInfo(data);
-      saveToHistory(data);
+      saveToHistory({ title: data.title, id: data.videoId, timestamp: new Date().toISOString() });
       if (customUrl) setUrl(targetUrl);
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to fetch video information. Ensure the backend URL is correct and active.');
+      const errorMsg = err.response?.data?.fallbackMessage || err.response?.data?.message || 'Failed to analyze link.';
+      setError(errorMsg);
       console.error('Fetch error:', err);
+      if (err.response?.data?.fallbackAction === 'upload_audio') {
+        // Show an explicit message telling the user to upload manually as defined by the backend
+        setError('Integration unavailable. Please upload the audio file directly or input transcription manually.');
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  const downloadVideo = async () => {
-    if (!url) return;
-    
-    setDownloading(true);
-    try {
-      // The direct stream URL
-      const downloadUrl = `${API_BASE_URL}/download?url=${encodeURIComponent(url)}`;
-      
-      // Create a temporary link to trigger download with proper filename if possible
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.setAttribute('download', `${videoInfo?.title || 'video'}.mp4`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      
-    } catch (err) {
-      setError('Download connection failed. Please try again.');
-      console.error('Download error:', err);
-    } finally {
-      // Direct stream downloads don't give a "done" event easily via window.location
-      // so we simulate the loading state for a better UX
-      setTimeout(() => setDownloading(false), 3000);
+  const downloadAudio = () => {
+    if (!videoInfo?.audioUrl) {
+      setError('Direct audio stream completely unavailable for this video.');
+      return;
     }
+    // Automatically open the isolated audio track via the public stream URL perfectly formatted by yt-dlp
+    window.open(videoInfo.audioUrl, '_blank');
   };
 
   const formatDate = (dateString) => {
@@ -273,11 +261,16 @@ function App() {
                         className="w-full h-full object-cover aspect-video md:aspect-auto"
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-60" />
-                      <div className="absolute bottom-4 left-4 flex gap-2">
+                        <div className="absolute bottom-4 left-4 flex gap-2">
                          <div className="bg-black/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-bold border border-white/10 flex items-center gap-2">
                           <Clock className="w-3.5 h-3.5 text-primary" />
-                          {formatDuration(videoInfo.duration)}
+                          {videoInfo.duration || '0:00'}
                         </div>
+                        {videoInfo.captionAvailable && (
+                          <div className="bg-primary/20 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-bold border border-primary/30 flex items-center gap-2 text-primary">
+                            <span>CC</span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -292,14 +285,14 @@ function App() {
                           {videoInfo.title}
                         </h2>
                         
-                        <div className="space-y-4 mb-10">
+                        <div className="space-y-4 mb-4">
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center font-bold text-primary">
-                              {videoInfo.author?.[0]}
+                              Y
                             </div>
                             <div>
-                              <p className="text-xs text-neutral-500 font-bold uppercase">Creator</p>
-                              <p className="text-sm font-medium">{videoInfo.author}</p>
+                              <p className="text-xs text-neutral-500 font-bold uppercase">Source ID</p>
+                              <p className="text-sm font-medium">{videoInfo.videoId}</p>
                             </div>
                           </div>
 
@@ -322,23 +315,14 @@ function App() {
                         </div>
                       </div>
 
-                      <div className="flex gap-4">
+                      <div className="flex gap-4 mt-8">
                         <button
-                          onClick={downloadVideo}
-                          disabled={downloading}
+                          onClick={downloadAudio}
+                          disabled={!videoInfo?.audioUrl}
                           className="flex-1 bg-white text-black hover:bg-neutral-200 py-4.5 rounded-[1.25rem] font-black flex items-center justify-center gap-3 transition-all active:scale-95 disabled:opacity-50"
                         >
-                          {downloading ? (
-                            <>
-                              <Loader2 className="w-5 h-5 animate-spin" />
-                              <span className="uppercase tracking-widest text-sm">Processing...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Download className="w-5 h-5" />
-                              <span className="uppercase tracking-widest text-sm">Start Download</span>
-                            </>
-                          )}
+                          <Download className="w-5 h-5" />
+                          <span className="uppercase tracking-widest text-sm">Open Target Audio</span>
                         </button>
                         <button className="p-4.5 bg-white/5 hover:bg-white/10 rounded-[1.25rem] transition-all border border-white/10 group">
                           <Share2 className="w-5 h-5 text-neutral-400 group-hover:text-white transition-colors" />
@@ -396,10 +380,9 @@ function App() {
                         className="p-4 rounded-2xl bg-white/[0.02] hover:bg-white/[0.05] border border-white/5 transition-all cursor-pointer group"
                       >
                         <div className="flex gap-4 items-center">
-                          <img src={item.thumbnail} className="w-16 h-10 rounded-lg object-cover" alt="" />
-                          <div className="flex-1 min-w-0">
+                          <div className="flex-1 min-w-0 py-2">
                             <p className="text-xs font-bold truncate group-hover:text-primary transition-colors">{item.title}</p>
-                            <p className="text-[10px] text-neutral-500 mt-0.5">{item.author}</p>
+                            <p className="text-[10px] text-neutral-500 mt-0.5">Video ID: {item.id}</p>
                           </div>
                         </div>
                       </motion.div>
