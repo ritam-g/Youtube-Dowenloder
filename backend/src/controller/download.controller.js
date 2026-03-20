@@ -6,8 +6,13 @@ const fs = require('fs');
 // Utility for video info
 const path = require("path");
 
-// Use locally downloaded yt-dlp if it exists (e.g., from Render build script), else fallback to global yt-dlp
-const ytDlpBinaryPath = fs.existsSync(path.join(process.cwd(), 'yt-dlp')) ? './yt-dlp' : (fs.existsSync(path.join(__dirname, '..', '..', 'yt-dlp.exe')) ? path.join(__dirname, '..', '..', 'yt-dlp.exe') : 'yt-dlp');
+const checkPaths = [
+    path.join(__dirname, '..', '..', 'yt-dlp'),
+    path.join(__dirname, '..', '..', 'yt-dlp.exe'),
+    path.join(process.cwd(), 'yt-dlp'),
+    path.join(process.cwd(), 'yt-dlp.exe')
+];
+const ytDlpBinaryPath = checkPaths.find(p => fs.existsSync(p)) || 'yt-dlp';
 
 /**
  * Helper to build standard yt-dlp arguments including cookies if configured
